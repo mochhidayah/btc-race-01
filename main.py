@@ -25,6 +25,8 @@ Dev-window result (local replay, exact harness fill model):
   vs buy-and-hold +$1.07, momentum baseline +$1.55, EMA-cross -$111.38,
   RSI-Bollinger -$24.25. Positive on both halves (+$20.92 first 1080
   bars, +$16.09 last 1080 bars) and on the time-reversed series (+$17.75).
+  - After a stop-loss sell, wait 30 bars before buying again, so the
+    bot never re-buys straight into the same falling knife.
 """
 import os
 import sys
@@ -38,14 +40,16 @@ DIP_BPS = 70        # buy when close is this far below the EMA
 RECOVER_BPS = 60    # sell when close is this far above the EMA
 STOP_BPS = 100      # sell when close is this far below the entry price
 MAX_SLIPPAGE_BPS = 100
+COOLDOWN_BARS = 30  # bars to wait after a stop-loss before buying again
 
 closes = []
 ema = None
 entry_price = None
+last_stop_bar = -10 ** 9
 
 
 def on_batch(state, batch):
-    global ema, entry_price
+    global ema, entry_price, last_stop_bar
     if SYMBOL not in {b["symbol"] for b in batch["bars"]}:
         return []
     c = state.close(SYMBOL)
@@ -56,14 +60,18 @@ def on_batch(state, batch):
     closes.append(c)
     held = state.positions.get(SYMBOL)
     if held is not None:
-        if c > ema * (1 + RECOVER_BPS / 10000.0) or (
-            entry_price is not None and c <= entry_price * (1 - STOP_BPS / 10000.0)
-        ):
+        if c > ema * (1 + RECOVER_BPS / 10000.0):
             entry_price = None
             return [{"side": "sell", "symbol": SYMBOL, "qty": held.qty,
                      "max_slippage_bps": MAX_SLIPPAGE_BPS}]
+        if entry_price is not None and c <= entry_price * (1 - STOP_BPS / 10000.0):
+            entry_price = None
+            last_stop_bar = len(closes)
+            return [{"side": "sell", "symbol": SYMBOL, "qty": held.qty,
+                     "max_slippage_bps": MAX_SLIPPAGE_BPS}]
         return []
-    if len(closes) >= EMA_BARS and c < ema * (1 - DIP_BPS / 10000.0):
+    if (len(closes) >= EMA_BARS and len(closes) - last_stop_bar > COOLDOWN_BARS
+            and c < ema * (1 - DIP_BPS / 10000.0)):
         entry_price = c
         return [{"side": "buy", "symbol": SYMBOL, "notional_quote_units": state.cash,
                  "max_slippage_bps": MAX_SLIPPAGE_BPS}]
